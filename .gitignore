@@ -1,0 +1,25 @@
+# Go build output
+/bin
+/obj
+
+# Go mod and sum files
+go.sum
+go.mod
+
+# IDE & editor settings
+.vscode/
+.idea/
+
+# Go test coverage files
+*.out
+*.test
+
+# Local development environment settings
+.env
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Vendor directories (if you are not using Go modules)
+vendor/
