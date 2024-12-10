@@ -1,13 +1,16 @@
 package main
 
 import (
-	"bytes"
-	"html/template"
+	"encoding/json"
 	"log"
-	"net/smtp"
 	"os"
 
+	"bytes"
+	"html/template"
+	"net/smtp"
+
 	"github.com/joho/godotenv"
+	"github.com/streadway/amqp"
 )
 
 // EmailData şablon için dinamik verileri temsil eder
@@ -33,51 +36,152 @@ func renderTemplate(templatePath string, data EmailData) (string, error) {
 
 // E-posta gönderme fonksiyonu
 func sendEmail(subject, body, recipient string) error {
-	// Çevresel değişkenleri yükle
 	err := godotenv.Load()
 	if err != nil {
 		log.Fatal("Çevresel değişkenler yüklenemedi:", err)
 	}
 
-	// .env dosyasından SMTP bilgilerini al
 	from := os.Getenv("SMTP_EMAIL")
 	password := os.Getenv("SMTP_PASSWORD")
 	smtpHost := os.Getenv("SMTP_HOST")
 	smtpPort := os.Getenv("SMTP_PORT")
 
-
 	auth := smtp.PlainAuth("", from, password, smtpHost)
 
-	msg := []byte("Subject: " + subject + "\r\n" +
-		"Content-Type: text/html; charset=\"utf-8\"\r\n" +
-		"\r\n" +
+	msg := []byte("Subject: " + subject + "\r\n" + 
+		"Content-Type: text/html; charset=\"utf-8\"\r\n" + 
+		"\r\n" + 
 		body)
 
-		err = smtp.SendMail(smtpHost+":"+smtpPort, auth, from, []string{recipient}, msg)
-		if err != nil {
-			return err
+	err = smtp.SendMail(smtpHost+":"+smtpPort, auth, from, []string{recipient}, msg)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// RabbitMQ'dan mesaj tüketme fonksiyonu
+func consumeAuthQueue() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatal("Çevresel değişkenler yüklenemedi:", err)
+	}
+
+	rabbitMQURL := os.Getenv("RABBITMQ_URL")
+	queueName := os.Getenv("AUTH_QUEUE_NAME")
+
+	conn, err := amqp.Dial(rabbitMQURL)
+	if err != nil {
+		log.Fatalf("RabbitMQ bağlantısı kurulamadı: %v", err)
+	}
+	defer conn.Close()
+
+	ch, err := conn.Channel()
+	if err != nil {
+		log.Fatalf("Kanal açılamadı: %v", err)
+	}
+	defer ch.Close()
+
+	q, err := ch.QueueDeclare(
+		queueName, 
+		true,   
+		false,  
+		false,  
+		false,  
+		nil,    
+	)
+	if err != nil {
+		log.Fatalf("Kuyruk bildirimi başarısız: %v", err)
+	}
+
+	msgs, err := ch.Consume(
+		q.Name, 
+		"",     
+		true,   
+		false,  
+		false,  
+		false,  
+		nil,    
+	)
+	if err != nil {
+		log.Fatalf("Mesaj tüketimi başarısız: %v", err)
+	}
+
+	forever := make(chan bool)
+
+	go func() {
+		for d := range msgs {
+			// Gelen ham mesajı yazdır
+			log.Printf("Ham Mesaj: %s", string(d.Body))
+
+			// Gelen mesajı işle
+			var message map[string]interface{}
+			err := json.Unmarshal(d.Body, &message)
+			if err != nil {
+				log.Printf("JSON çözümleme hatası: %v", err)
+				continue
+			}
+
+			// Gelen mesajın tüm detaylarını yazdır
+			log.Printf("Mesaj İçeriği: %+v", message)
+
+			// Pattern içindeki cmd'yi kontrol et
+			patternMap, patternOk := message["pattern"].(map[string]interface{})
+			if !patternOk {
+				log.Printf("Geçersiz pattern formatı: %+v", message)
+				continue
+			}
+
+			cmd, cmdOk := patternMap["cmd"].(string)
+			if !cmdOk || cmd != "send_email" {
+				log.Printf("Geçersiz komut: %v", cmd)
+				continue
+			}
+
+			// Data'yı al
+			data, dataOk := message["data"].(map[string]interface{})
+			if !dataOk {
+				log.Printf("Geçersiz data formatı: %+v", message)
+				continue
+			}
+
+			// Email ve aktivasyon kodu çıkarma
+			email, emailOk := data["email"].(string)
+			activationCode, codeOk := data["activation_code"].(string)
+
+			if !emailOk || !codeOk {
+				log.Printf("Eksik email veya aktivasyon kodu: %+v", data)
+				continue
+			}
+
+			// Aktivasyon e-postası için dinamik veriler
+			emailData := EmailData{
+				ActivationCode: activationCode,
+				ActivationLink: "https://example.com/activate?code=" + activationCode,
+			}
+
+			// Şablonu oluştur
+			body, err := renderTemplate("templates/activation_email.html", emailData)
+			if err != nil {
+				log.Printf("Şablon oluşturulamadı: %v", err)
+				continue
+			}
+
+			// E-posta gönder
+			err = sendEmail("Hesap Aktivasyonu", body, email)
+			if err != nil {
+				log.Printf("E-posta gönderilemedi: %v", err)
+				continue
+			}
+
+			log.Printf("E-posta başarıyla gönderildi. Alıcı: %s", email)
 		}
-		return nil
+	}()
+
+	log.Printf(" [*] RabbitMQ kuyruğunu dinlemeye başladı. Çıkış için CTRL+C kullanın")
+	<-forever
 }
 
 func main() {
-	// Aktivasyon e-postası için dinamik veriler
-	data := EmailData{
-		ActivationCode: "123456",
-		ActivationLink: "https://example.com/activate?code=123456",
-	}
-
-	// Şablonu oluştur
-	body, err := renderTemplate("templates/activation_email.html", data)
-	if err != nil {
-		log.Fatal("Şablon oluşturulamadı:", err)
-	}
-
-	// E-posta gönder
-	err = sendEmail("Hesap Aktivasyonu", body, "recipient@example.com")
-	if err != nil {
-		log.Fatal("E-posta gönderilemedi:", err)
-	}
-
-	log.Println("E-posta başarıyla gönderildi.")
+	consumeAuthQueue()
 }
