@@ -16,7 +16,7 @@ import (
 // EmailData şablon için dinamik verileri temsil eder
 type EmailData struct {
 	ActivationCode string
-	ActivationLink string
+	UserName string
 }
 
 // Şablon oluşturma fonksiyonu
@@ -68,7 +68,7 @@ func consumeAuthQueue() {
 	}
 
 	rabbitMQURL := os.Getenv("RABBITMQ_URL")
-	queueName := os.Getenv("AUTH_QUEUE_NAME")
+	queueName := os.Getenv("EMAIL_QUEUE_NAME")
 
 	conn, err := amqp.Dial(rabbitMQURL)
 	if err != nil {
@@ -133,8 +133,8 @@ func consumeAuthQueue() {
 			}
 
 			cmd, cmdOk := patternMap["cmd"].(string)
-			if !cmdOk || cmd != "send_email" {
-				log.Printf("Geçersiz komut: %v", cmd)
+			if !cmdOk {
+				log.Printf("Komut eksik veya geçersiz: %+v", message)
 				continue
 			}
 
@@ -148,27 +148,42 @@ func consumeAuthQueue() {
 			// Email ve aktivasyon kodu çıkarma
 			email, emailOk := data["email"].(string)
 			activationCode, codeOk := data["activation_code"].(string)
+			templateName, templateOk := data["template_name"].(string)
+			userName, userNameOk := data["userName"].(string)
 
-			if !emailOk || !codeOk {
-				log.Printf("Eksik email veya aktivasyon kodu: %+v", data)
+			if !emailOk || !codeOk || !templateOk ||!userNameOk{
+				log.Printf("Eksik email, aktivasyon kodu veya şablon adı: %+v", data)
 				continue
 			}
+
+			var subject string
+			switch cmd {
+			case "active_user":
+				subject = "Hesap Aktivasyonu"
+			case "forgot_password":
+				subject = "Şifre Sıfırlama"
+			default:
+				log.Printf("Desteklenmeyen komut: %v", cmd)
+				continue
+			}
+
 
 			// Aktivasyon e-postası için dinamik veriler
 			emailData := EmailData{
 				ActivationCode: activationCode,
-				ActivationLink: "https://example.com/activate?code=" + activationCode,
+				UserName: userName,
 			}
 
 			// Şablonu oluştur
-			body, err := renderTemplate("templates/activation_email.html", emailData)
+			body, err := renderTemplate("templates/"+templateName, emailData)
 			if err != nil {
 				log.Printf("Şablon oluşturulamadı: %v", err)
 				continue
 			}
 
+
 			// E-posta gönder
-			err = sendEmail("Hesap Aktivasyonu", body, email)
+			err = sendEmail(subject, body, email)
 			if err != nil {
 				log.Printf("E-posta gönderilemedi: %v", err)
 				continue
